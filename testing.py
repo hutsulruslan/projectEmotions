@@ -8,6 +8,22 @@ import numpy as np
 import pyaudio
 import soundfile  # to read audio file
 import speech_recognition as sr
+import pyodbc
+import datetime
+from geopy.geocoders import Nominatim
+import geocoder
+import pickle
+import os
+from googleapiclient.discovery import build
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.http import MediaFileUpload
+
+server = '5.58.28.5,1433'
+database = 'hutsul_sr'
+username = 'rhutsul'
+password = '111'
+cnxn = pyodbc.connect('DRIVER={ODBC Driver 17 for SQL Server};SERVER='+server+';DATABASE='+database+';UID='+username+';PWD='+ password)
 
 
 def extract_feature(file_name, **kwargs):
@@ -173,8 +189,14 @@ def record_to_file(path):
 loaded_model = pickle.load(open("result/mlp_classifier.model", 'rb'))
 
 print("Please talk")
-filename = "test.wav"
-a = filename
+
+#визначення кількості записів у таблиці
+cursor = cnxn.cursor()
+cursor.execute("select count(*) from speech")
+n = cursor.fetchone()[0]
+n = n + 1
+filename = "test" + str(n) + ".wav"
+#a = filename
 
     #record the file (start talking)
 record_to_file(filename)
@@ -198,3 +220,76 @@ with sr.AudioFile(filename) as source:
     # recognize (convert from speech to text)
     text=mic.recognize_google(audio_data, language = 'uk-UA')
     print(text)
+
+#Heolocation
+# instantiate a new Nominatim client
+app = Nominatim(user_agent="tutorial")
+
+my_location = geocoder.ip('me')
+
+# my latitude and longitude coordinates
+latitude = my_location.lat
+longitude = my_location.lng
+coordinates = f"{latitude}, {longitude}"
+
+# get the address info
+address = app.reverse(coordinates, language="en").raw
+
+
+#Save to database
+currenttime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+tsql = "INSERT INTO speech (data,latitude,longitude,emotion,text,nameFile) VALUES ('"+str(currenttime)+"','"+str(latitude)+"','"+str(longitude)+"','"+result+"','"+text+"','"+filename+"')"
+with cursor.execute(tsql):
+    print ('Successfully Inserted!')
+
+#Google Drive
+# If modifying these scopes, delete the file token.pickle.
+SCOPES = ['https://www.googleapis.com/auth/drive.metadata.readonly',
+          'https://www.googleapis.com/auth/drive.file']
+
+
+def get_gdrive_service():
+    creds = None
+    # The file token.pickle stores the user's access and refresh tokens, and is
+    # created automatically when the authorization flow completes for the first
+    # time.
+    if os.path.exists('token.pickle'):
+        with open('token.pickle', 'rb') as token:
+            creds = pickle.load(token)
+    # If there are no (valid) credentials available, let the user log in.
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        # Save the credentials for the next run
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(creds, token)
+
+    return build('drive', 'v3', credentials=creds)
+
+# authenticate account
+service = get_gdrive_service()
+# folder details we want to make
+folder_metadata = {
+    "name": currenttime,
+    "mimeType": "application/vnd.google-apps.folder"
+}
+# create the folder
+file = service.files().create(body=folder_metadata, fields="id").execute()
+# get the folder id
+folder_id = file.get("id")
+
+# upload a file text file
+# first, define file metadata, such as the name and the parent folder ID
+file_metadata = {
+    "name": filename,
+    "parents": [folder_id]
+}
+# upload
+media = MediaFileUpload(filename, resumable=True)
+file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+
+print("Google Drive Save")
